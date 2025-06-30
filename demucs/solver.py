@@ -213,6 +213,8 @@ class Solver(object):
         z = self.dmodel._spec(mix)
         mag = self.dmodel._magnitude(z).to(mix.device)
         example_inputs = (mix,mag) 
+        pretrained_model = torch.load("../../955717e8-8726e21a.th",weights_only=False) # 导入预训练权重
+        self.dmodel.load_state_dict(pretrained_model, strict=False) # 将与训练权重载入模型
         # example_inputs = mix
         self.dmodel.forward = self.dmodel.forward_for_export
 
