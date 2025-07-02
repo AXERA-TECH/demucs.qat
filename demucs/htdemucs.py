@@ -679,9 +679,10 @@ class HTDemucs(nn.Module):
         return x
 
     def forward_for_export(self, mix, mag):
+        # https://github.com/microsoft/onnxscript/blob/ec806972573dbcccde5af269297e5f8444b0f279/onnxscript/function_libs/torch_lib/ops/prims.py#L179
+        # 现在还不支持 broadcast
         length = mix.shape[-1]
         length_pre_pad = None
-        self.segment = Fraction(mix.shape[-1], self.samplerate)
         # if self.use_train_segment:
         #     if self.training:
         #         self.segment = Fraction(mix.shape[-1], self.samplerate)

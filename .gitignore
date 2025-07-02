@@ -1,0 +1,9 @@
+
+demucs/__pycache__/**
+utils/__pycache__/*.pyc
+**/__pycache__/
+outputs/
+*.pt
+release_models/
+separated/htdemucs/test/*.wav
+demucs.egg-info/

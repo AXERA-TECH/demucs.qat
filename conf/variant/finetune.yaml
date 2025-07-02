@@ -1,15 +1,21 @@
 # @package _global_
 
-epochs: 4
-batch_size: 16
+epochs: 1
+batch_size: 1
+model: htdemucs # see demucs/train.py for the possibilities, and config for each model hereafter.
+continue_pretrained: "955717e8"
 optim:
   lr: 0.0006
 test:
-  every: 1
+  every: 20
   sdr: false
 dset:
-  segment: 28
-  shift: 2
+  segment: 10
+  shift: 1
+
+htdemucs: # see demucs/htdemucs.py for a detailed description
+  channels: 48
+  bottom_channels: 512
 
 augment:
   scale:

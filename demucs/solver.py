@@ -11,8 +11,9 @@ from dora import get_xp
 from dora.utils import write_and_rename
 from dora.log import LogProgress, bold
 import torch
+import torch._dynamo.compiled_autograd
 import torch.nn.functional as F
-
+import os
 from . import augment, distrib, states, pretrained
 from .apply import apply_model
 from .ema import ModelEMA
@@ -27,6 +28,7 @@ from torch.ao.quantization.quantizer.xnnpack_quantizer import (
 )
 from torch.ao.quantization.quantize_pt2e import (
   prepare_qat_pt2e,
+  prepare_pt2e,
   convert_pt2e,
 )
 from utils.ax_quantizer import(
@@ -126,7 +128,7 @@ class Solver(object):
         """Reset state of the solver, potentially using checkpoint."""
         if self.checkpoint_file.exists():
             logger.info(f'Loading checkpoint model: {self.checkpoint_file}')
-            package = torch.load(self.checkpoint_file, 'cpu')
+            package = torch.load(self.checkpoint_file, 'cpu', weights_only=False)
             self.model.load_state_dict(package['state'])
             self.optimizer.load_state_dict(package['optimizer'])
             self.history[:] = package['history']
@@ -208,150 +210,199 @@ class Solver(object):
                     logger.info(bold(f"Test Summary | Epoch {epoch + 1} | {_summary(formatted)}"))
 
         # quantizer
-        mix = torch.rand(1, 2, 382788).to("cuda")
+        seconds = 7.8
+        segment = int(44100 * seconds)
+        mix = torch.rand(2, 2, segment).to("cuda")
         # print(self.dmodel)
         z = self.dmodel._spec(mix)
         mag = self.dmodel._magnitude(z).to(mix.device)
-        example_inputs = (mix,mag) 
-        pretrained_model = torch.load("../../955717e8-8726e21a.th",weights_only=False) # 导入预训练权重
-        self.dmodel.load_state_dict(pretrained_model, strict=False) # 将与训练权重载入模型
+        example_inputs = (mix, mag) 
+
+        mix1 = torch.rand(1, 2, segment).to("cuda")
+        # print(self.dmodel)
+        z1 = self.dmodel._spec(mix1)
+        mag1 = self.dmodel._magnitude(z1).to(mix1.device)
+        export_example_inputs = (mix1, mag1) 
+
+        print(mix.shape, mag.shape)
         # example_inputs = mix
         self.dmodel.forward = self.dmodel.forward_for_export
-
-        dynamo_export(self.dmodel.to(mix.device), example_inputs, './htdemocus_float_model.onnx')
+        DO_QAT = True
+        DEVICE = "cuda"
+        # dynamo_export(self.dmodel.to(mix.device), example_inputs, './htdemocus_float_model.onnx')
         global_config, regional_configs = load_config("../../../config.json")
         quantizer = AXQuantizer()
         quantizer.set_global(global_config)
         quantizer.set_regional(regional_configs)
 
         # # old code
+
         # exported_model = torch.export.export_for_training(self.dmodel, example_inputs).module()
-        exported_model = torch.export.export_for_training(self.dmodel.to(mix.device), example_inputs).module()
+        dynamic_shapes = {
+            "mix":{0: torch.export.Dim.AUTO,2:torch.export.Dim.AUTO} , "mag":{0: torch.export.Dim.AUTO,3:torch.export.Dim.AUTO} 
+        }
+            
+        exported_model = torch.export.export_for_training(self.dmodel.to(mix.device), example_inputs, dynamic_shapes=dynamic_shapes).module()
+        self.dmodel = prepare_qat_pt2e(exported_model, quantizer).to(DEVICE)
+        e_inputs= (export_example_inputs[0].to(DEVICE),export_example_inputs[1].to(DEVICE))
+        # self.dmodel = prepare_pt2e(exported_model, quantizer).to('cuda')
+        
 
-        # from torch.export.exported_program import default_decompositions
-        # decompositions = default_decompositions()
+        # do ptq
+        # with torch.no_grad():
+        #     valid = self._run_one_epoch(0, train=False)
+        #     bvalid = valid
+        #     bname = 'main'
+            
+        #     device = "cuda"
+        #     torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
+        #     e_inputs= (export_example_inputs[0].to(device),export_example_inputs[1].to(device))
+        #     inf_model = torch.export.export(self.dmodel, e_inputs)
+            
+        #     save_ptq_path = os.path.join(os.getcwd(), "./htdemucs_ptq.pt")
+        #     torch.export.save(inf_model, save_ptq_path)
+        #     logger.debug("ptq model saved to %s", save_ptq_path)
+            
+            
 
-        # decompositions = {
-        #     k: v
-        #     for k, v in decompositions.items()
-        #     if str(k) in [
-        #         "aten._scaled_dot_product_flash_attention_for_cpu.default",
-        #         "aten._scaled_dot_product_attention_math.default", 
-        #         "aten.scaled_dot_product_attention.default", # loss backward会报错'RuntimeError: LSE is not correctly aligned (strideH)'
-        #     ]
-        # }
-        # exported_model = exported_model.run_decompositions(decompositions).module()
+        #     state = states.copy_state(self.model.state_dict())
+        #     metrics['valid'] = {}
+        #     metrics['valid']['main'] = valid
+        #     key = self.args.test.metric
+        #     for kind, emas in self.emas.items():
+        #         for k, ema in enumerate(emas):
+        #             with ema.swap():
+        #                 valid = self._run_one_epoch(0, train=False)
+        #             name = f'ema_{kind}_{k}'
+        #             metrics['valid'][name] = valid
+        #             a = valid[key]
+        #             b = bvalid[key]
+        #             if key.startswith('nsdr'):
+        #                 a = -a
+        #                 b = -b
+        #             if a < b:
+        #                 bvalid = valid
+        #                 state = ema.state
+        #                 bname = name
+        #         metrics['valid'].update(bvalid)
+        #         metrics['valid']['bname'] = bname
 
-        self.dmodel = prepare_qat_pt2e(exported_model, quantizer).to('cuda')
-        # self.dmodel.forward = self.dmodel.forward_for_export
+        #     valid_loss = metrics['valid'][key]
+        #     mets = pull_metric(self.link.history, f'valid.{key}') + [valid_loss]
+        #     if key.startswith('nsdr'):
+        #         best_loss = max(mets)
+        #     else:
+        #         best_loss = min(mets)
+        #     metrics['valid']['best'] = best_loss
+        #     if self.args.svd.penalty > 0:
+        #         kw = dict(self.args.svd)
+        #         kw.pop('penalty')
+        #         with torch.no_grad():
+        #             penalty = svd_penalty(self.model, exact=True, **kw)
+        #         metrics['valid']['penalty'] = penalty
 
-        epoch = 0
-        for epoch in range(len(self.history), self.args.epochs):
-            # Train one epoch
-            self.model.train()  # Turn on BatchNorm & Dropout
-            metrics = {}
-            logger.info('-' * 70)
-            logger.info("Training...")
-            metrics['train'] = self._run_one_epoch(epoch)
-            formatted = self._format_train(metrics['train'])
-            logger.info(
-                bold(f'Train Summary | Epoch {epoch + 1} | {_summary(formatted)}'))
-
-            # Cross validation
-            logger.info('-' * 70)
-            logger.info('Cross validation...')
-            self.model.eval()  # Turn off Batchnorm & Dropout
-            with torch.no_grad():
-                valid = self._run_one_epoch(epoch, train=False)
-                bvalid = valid
-                bname = 'main'
-                state = states.copy_state(self.model.state_dict())
-                metrics['valid'] = {}
-                metrics['valid']['main'] = valid
-                key = self.args.test.metric
-                for kind, emas in self.emas.items():
-                    for k, ema in enumerate(emas):
-                        with ema.swap():
-                            valid = self._run_one_epoch(epoch, train=False)
-                        name = f'ema_{kind}_{k}'
-                        metrics['valid'][name] = valid
-                        a = valid[key]
-                        b = bvalid[key]
-                        if key.startswith('nsdr'):
-                            a = -a
-                            b = -b
-                        if a < b:
-                            bvalid = valid
-                            state = ema.state
-                            bname = name
-                    metrics['valid'].update(bvalid)
-                    metrics['valid']['bname'] = bname
-
-            valid_loss = metrics['valid'][key]
-            mets = pull_metric(self.link.history, f'valid.{key}') + [valid_loss]
-            if key.startswith('nsdr'):
-                best_loss = max(mets)
-            else:
-                best_loss = min(mets)
-            metrics['valid']['best'] = best_loss
-            if self.args.svd.penalty > 0:
-                kw = dict(self.args.svd)
-                kw.pop('penalty')
-                with torch.no_grad():
-                    penalty = svd_penalty(self.model, exact=True, **kw)
-                metrics['valid']['penalty'] = penalty
-
-            formatted = self._format_train(metrics['valid'])
-            logger.info(
-                bold(f'Valid Summary | Epoch {epoch + 1} | {_summary(formatted)}'))
-
-            # Save the best model
-            if valid_loss == best_loss or self.args.dset.train_valid:
-                logger.info(bold('New best valid loss %.4f'), valid_loss)
-                self.best_state = states.copy_state(state)
-                self.best_changed = True
-
-            # Eval model every `test.every` epoch or on last epoch
-            should_eval = (epoch + 1) % self.args.test.every == 0
-            is_last = epoch == self.args.epochs - 1
-            # # Tries to detect divergence in a reliable way and finish job
-            # # not to waste compute.
-            # # Commented out as this was super specific to the MDX competition.
-            # reco = metrics['valid']['main']['reco']
-            # div = epoch >= 180 and reco > 0.18
-            # div = div or epoch >= 100 and reco > 0.25
-            # div = div and self.args.optim.loss == 'l1'
-            # if div:
-            #     logger.warning("Finishing training early because valid loss is too high.")
-            #     is_last = True
-            # if False:
-            if should_eval or is_last:
-                # Evaluate on the testset
+        #     formatted = self._format_train(metrics['valid'])
+        #     logger.info(
+        #         bold(f'Valid Summary | PTQ Model | {_summary(formatted)}'))
+            
+            
+        if DO_QAT:
+            epoch = 0
+            for epoch in range(len(self.history), self.args.epochs):
+                # Train one epoch
+                self.model.train()  # Turn on BatchNorm & Dropout
+                torch.ao.quantization.move_exported_model_to_train(self.dmodel)
+                metrics = {}
                 logger.info('-' * 70)
-                logger.info('Evaluating on the test set...')
-                # We switch to the best known model for testing
-                if self.args.test.best:
-                    state = self.best_state
-                else:
-                    state = states.copy_state(self.model.state_dict())
-                compute_sdr = self.args.test.sdr and is_last
-                with states.swap_state(self.model, state):
-                    with torch.no_grad():
-                        metrics['test'] = evaluate(self, compute_sdr=compute_sdr)
-                formatted = self._format_test(metrics['test'])
-                logger.info(bold(f"Test Summary | Epoch {epoch + 1} | {_summary(formatted)}"))
-            self.link.push_metrics(metrics)
+                logger.info("Training...")
+                metrics['train'] = self._run_one_epoch(epoch)
+                formatted = self._format_train(metrics['train'])
+                logger.info(
+                    bold(f'Train Summary | Epoch {epoch + 1} | {_summary(formatted)}'))
 
-            if distrib.rank == 0:
-                # Save model each epoch
-                self._serialize(epoch)
-                logger.debug("Checkpoint saved to %s", self.checkpoint_file.resolve())
-            if is_last:
-                break
+                # Cross validation
+                logger.info('-' * 70)
+                logger.info('Cross validation...')
+                self.model.eval()  # Turn off Batchnorm & Dropout
+                torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
+                with torch.no_grad():
+                    valid = self._run_one_epoch(epoch, train=False)
+                    bvalid = valid
+                    bname = 'main'
+                    state = states.copy_state(self.model.state_dict())
+                    metrics['valid'] = {}
+                    metrics['valid']['main'] = valid
+                    key = self.args.test.metric
+                    for kind, emas in self.emas.items():
+                        for k, ema in enumerate(emas):
+                            with ema.swap():
+                                valid = self._run_one_epoch(epoch, train=False)
+                            name = f'ema_{kind}_{k}'
+                            metrics['valid'][name] = valid
+                            a = valid[key]
+                            b = bvalid[key]
+                            if key.startswith('nsdr'):
+                                a = -a
+                                b = -b
+                            if a < b:
+                                bvalid = valid
+                                state = ema.state
+                                bname = name
+                        metrics['valid'].update(bvalid)
+                        metrics['valid']['bname'] = bname
+
+                    valid_loss = metrics['valid'][key]
+                    mets = pull_metric(self.link.history, f'valid.{key}') + [valid_loss]
+                    if key.startswith('nsdr'):
+                        best_loss = max(mets)
+                    else:
+                        best_loss = min(mets)
+                    metrics['valid']['best'] = best_loss
+                    if self.args.svd.penalty > 0:
+                        kw = dict(self.args.svd)
+                        kw.pop('penalty')
+                        with torch.no_grad():
+                            penalty = svd_penalty(self.model, exact=True, **kw)
+                        metrics['valid']['penalty'] = penalty
+
+                    formatted = self._format_train(metrics['valid'])
+                    logger.info(
+                        bold(f'Valid Summary | Epoch {epoch + 1} | {_summary(formatted)}'))
+
+                    # Save the best model
+                    if valid_loss == best_loss or self.args.dset.train_valid:
+                        logger.info(bold('New best valid loss %.4f'), valid_loss)
+                        self.best_state = states.copy_state(state)
+                        self.best_changed = True
+                        with torch.no_grad():
+                            device = "cuda"
+                            e_inputs= (export_example_inputs[0].to(device),export_example_inputs[1].to(device))
+                            torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
+                            pt_model = torch.export.export(self.dmodel, e_inputs)
+                            torch.export.save(pt_model, "./htdemucs_bset_qat.pt")
+                    # Eval model every `test.every` epoch or on last epoch
+                    should_eval = (epoch + 1) % self.args.test.every == 0
+                    is_last = epoch == self.args.epochs - 1
+                    
+                    self.link.push_metrics(metrics)
+
+                    if distrib.rank == 0:
+                        # Save model each epoch
+                        self._serialize(epoch)
+                        logger.debug("Checkpoint saved to %s", self.checkpoint_file.resolve())
+                    if is_last:
+                        break
+
+        with torch.no_grad():
+            device = "cuda"
+            e_inputs= (export_example_inputs[0].to(device),export_example_inputs[1].to(device))
+            torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
+            pt_model = torch.export.export(self.dmodel, e_inputs)
+            torch.export.save(pt_model, "./htdemucs_last_qat.pt")
         import copy
         prepared_model_copy = copy.deepcopy(self.dmodel).to(mix.device)
-        quantized_model = convert_pt2e(prepared_model_copy)
-        onnx_program = torch.onnx.export(quantized_model, example_inputs, dynamo=True)
+        quantized_model = convert_pt2e(prepared_model_copy)         
+        onnx_program = torch.onnx.export(quantized_model, export_example_inputs, dynamo=True)
         onnx_program.optimize()
         onnx_program.save("./htdemucs_qat.onnx")
 
