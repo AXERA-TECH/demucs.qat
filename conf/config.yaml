@@ -8,7 +8,7 @@ defaults:
 
 dummy:
 dset:
-  musdb: /data/tmp/zhangbangzhong/dataset/music/musdbhq
+  musdb: /data/tmp/xx/dataset/music/musdbhq
   musdb_samplerate: 44100
   use_musdb: true   # set to false to not use musdb as training data.
   wav:  # path to custom wav dataset

@@ -5,7 +5,7 @@
 2. 修改 conf/config.yaml 中 musdb 数据集路径
 ```
 dset:
-  musdb: /data/tmp/zhangbangzhong/dataset/music/musdbhq
+  musdb: /data/tmp/xx/dataset/music/musdbhq
 ```
 3. 将 finetune 所需的目录拷贝到 outputs/xps/ 下，比如 `outputs/xps/955717e8` 
 5. 执行 `CUDA_VISIBLE_DEVICES=2 dora run -f 955717e8 variant=finetune batch_size=4 epochs=1` 开始训练。**955717e8**指预训练模型的SIG，batch_size 和 epochs 可以根据实际需求设置。
