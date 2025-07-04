@@ -20,7 +20,7 @@ from .ema import ModelEMA
 from .evaluate import evaluate, new_sdr
 from .svd import svd_penalty
 from .utils import pull_metric, EMA
-
+import copy
 import torch
 from torch.ao.quantization.quantizer.xnnpack_quantizer import (
     XNNPACKQuantizer,
@@ -208,17 +208,19 @@ class Solver(object):
                 formatted = self._format_test(metrics['test'])
                 if formatted:
                     logger.info(bold(f"Test Summary | Epoch {epoch + 1} | {_summary(formatted)}"))
-
+        DO_QAT = True
+        DEVICE = "cuda"
+        PTQ_STATE_TO_DICT = None
         # quantizer
         seconds = 7.8
         segment = int(44100 * seconds)
-        mix = torch.rand(2, 2, segment).to("cuda")
+        mix = torch.rand(2, 2, segment).to(DEVICE)
         # print(self.dmodel)
         z = self.dmodel._spec(mix)
         mag = self.dmodel._magnitude(z).to(mix.device)
         example_inputs = (mix, mag) 
 
-        mix1 = torch.rand(1, 2, segment).to("cuda")
+        mix1 = torch.rand(1, 2, segment).to(DEVICE)
         # print(self.dmodel)
         z1 = self.dmodel._spec(mix1)
         mag1 = self.dmodel._magnitude(z1).to(mix1.device)
@@ -227,85 +229,48 @@ class Solver(object):
         print(mix.shape, mag.shape)
         # example_inputs = mix
         self.dmodel.forward = self.dmodel.forward_for_export
-        DO_QAT = True
-        DEVICE = "cuda"
+         # exported_model = torch.export.export_for_training(self.dmodel, example_inputs).module()
+        dynamic_shapes = {
+            "mix":{0: torch.export.Dim.AUTO,2:torch.export.Dim.AUTO} , "mag":{0: torch.export.Dim.AUTO,3:torch.export.Dim.AUTO} 
+        }
+        ori_model = copy.deepcopy(self.dmodel)
+        exported_model = torch.export.export_for_training(self.dmodel.to(DEVICE), example_inputs, dynamic_shapes=dynamic_shapes).module()
+        
+        exported_model_forqat = copy.deepcopy(exported_model)
+        
         # dynamo_export(self.dmodel.to(mix.device), example_inputs, './htdemocus_float_model.onnx')
-        global_config, regional_configs = load_config("../../../config.json")
+        global_config, regional_configs = load_config("../../../config.json", is_qat=False)
         quantizer = AXQuantizer()
         quantizer.set_global(global_config)
         quantizer.set_regional(regional_configs)
 
         # # old code
 
-        # exported_model = torch.export.export_for_training(self.dmodel, example_inputs).module()
-        dynamic_shapes = {
-            "mix":{0: torch.export.Dim.AUTO,2:torch.export.Dim.AUTO} , "mag":{0: torch.export.Dim.AUTO,3:torch.export.Dim.AUTO} 
-        }
-            
-        exported_model = torch.export.export_for_training(self.dmodel.to(mix.device), example_inputs, dynamic_shapes=dynamic_shapes).module()
         self.dmodel = prepare_qat_pt2e(exported_model, quantizer).to(DEVICE)
-        e_inputs= (export_example_inputs[0].to(DEVICE),export_example_inputs[1].to(DEVICE))
         # self.dmodel = prepare_pt2e(exported_model, quantizer).to('cuda')
         
-
         # do ptq
-        # with torch.no_grad():
-        #     valid = self._run_one_epoch(0, train=False)
-        #     bvalid = valid
-        #     bname = 'main'
-            
-        #     device = "cuda"
-        #     torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
-        #     e_inputs= (export_example_inputs[0].to(device),export_example_inputs[1].to(device))
-        #     inf_model = torch.export.export(self.dmodel, e_inputs)
-            
-        #     save_ptq_path = os.path.join(os.getcwd(), "./htdemucs_ptq.pt")
-        #     torch.export.save(inf_model, save_ptq_path)
-        #     logger.debug("ptq model saved to %s", save_ptq_path)
-            
-            
+        with torch.no_grad():
+            valid = self._run_one_epoch(0, train=False)
+            bvalid = valid
 
-        #     state = states.copy_state(self.model.state_dict())
-        #     metrics['valid'] = {}
-        #     metrics['valid']['main'] = valid
-        #     key = self.args.test.metric
-        #     for kind, emas in self.emas.items():
-        #         for k, ema in enumerate(emas):
-        #             with ema.swap():
-        #                 valid = self._run_one_epoch(0, train=False)
-        #             name = f'ema_{kind}_{k}'
-        #             metrics['valid'][name] = valid
-        #             a = valid[key]
-        #             b = bvalid[key]
-        #             if key.startswith('nsdr'):
-        #                 a = -a
-        #                 b = -b
-        #             if a < b:
-        #                 bvalid = valid
-        #                 state = ema.state
-        #                 bname = name
-        #         metrics['valid'].update(bvalid)
-        #         metrics['valid']['bname'] = bname
+            PTQ_STATE_TO_DICT = self.dmodel.state_dict()
+            torch.save(PTQ_STATE_TO_DICT, "./ptq.pth")
+            logger.info('save ptq weights to ./ptq.pth')
 
-        #     valid_loss = metrics['valid'][key]
-        #     mets = pull_metric(self.link.history, f'valid.{key}') + [valid_loss]
-        #     if key.startswith('nsdr'):
-        #         best_loss = max(mets)
-        #     else:
-        #         best_loss = min(mets)
-        #     metrics['valid']['best'] = best_loss
-        #     if self.args.svd.penalty > 0:
-        #         kw = dict(self.args.svd)
-        #         kw.pop('penalty')
-        #         with torch.no_grad():
-        #             penalty = svd_penalty(self.model, exact=True, **kw)
-        #         metrics['valid']['penalty'] = penalty
+        del exported_model
+        del self.dmodel
 
-        #     formatted = self._format_train(metrics['valid'])
-        #     logger.info(
-        #         bold(f'Valid Summary | PTQ Model | {_summary(formatted)}'))
-            
-            
+        global_config, regional_configs = load_config("../../../config.json", is_qat=True)
+        qat_quantizer = AXQuantizer()
+        qat_quantizer.set_global(global_config)
+        qat_quantizer.set_regional(regional_configs)
+        ori_model = copy.deepcopy(self.dmodel)
+        exported_model = torch.export.export_for_training(ori_model.to(DEVICE), example_inputs, dynamic_shapes=dynamic_shapes).module()
+        self.dmodel = prepare_qat_pt2e(exported_model.to(DEVICE), qat_quantizer).to(DEVICE)
+        if PTQ_STATE_TO_DICT is not None:
+            self.dmodel.load_state_dict(PTQ_STATE_TO_DICT)
+        
         if DO_QAT:
             epoch = 0
             for epoch in range(len(self.history), self.args.epochs):
@@ -399,7 +364,7 @@ class Solver(object):
             torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
             pt_model = torch.export.export(self.dmodel, e_inputs)
             torch.export.save(pt_model, "./htdemucs_last_qat.pt")
-        import copy
+        
         prepared_model_copy = copy.deepcopy(self.dmodel).to(mix.device)
         quantized_model = convert_pt2e(prepared_model_copy)         
         onnx_program = torch.onnx.export(quantized_model, export_example_inputs, dynamo=True)

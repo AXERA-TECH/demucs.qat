@@ -94,21 +94,19 @@ def get_quantization_config(
     )
     extra_args: Dict[str, Any] = {"eps": 2**-12}
 
-    if is_qat:
-        if is_dynamic:
-            act_observer_or_fake_quant_ctr = FakeQuantize
-            dynamic_quant_observer = MovingAverageMinMaxObserver.with_args(
-                averaging_constant=1
-            )
-            extra_args["observer"] = dynamic_quant_observer
-        else:
-            act_observer_or_fake_quant_ctr = FusedMovingAvgObsFakeQuantize  # type: ignore[assignment]
-    else:
-        if is_dynamic:
-            act_observer_or_fake_quant_ctr = PlaceholderObserver  # type: ignore[assignment]
-        else:
-            act_observer_or_fake_quant_ctr = HistogramObserver  # type: ignore[assignment]
+    averaging_constant = 0.01 if is_qat else 0.0
 
+    if is_dynamic:
+        act_observer_or_fake_quant_ctr = FakeQuantize
+        dynamic_quant_observer = MovingAverageMinMaxObserver.with_args(
+            averaging_constant=1
+        )
+        extra_args["observer"] = dynamic_quant_observer
+    else:
+        act_observer_or_fake_quant_ctr = FusedMovingAvgObsFakeQuantize
+
+
+    extra_args["averaging_constant"] = averaging_constant
     input_dtype = quant_config.input_dtype
     if input_dtype is not None:
         input_quantization_spec = QuantizationSpec(
@@ -143,21 +141,17 @@ def get_quantization_config(
     # weight
     weight_qscheme = torch.per_channel_symmetric
     extra_args: Dict[str, Any] = {"eps": 2**-12}
-    if is_qat:
-        if weight_qscheme == torch.per_tensor_symmetric:
-            extra_args["observer"] = MovingAverageMinMaxObserver
-        else:
-            extra_args["observer"] = MovingAveragePerChannelMinMaxObserver  # type: ignore[dict-item]
+    if weight_qscheme == torch.per_tensor_symmetric:
+        extra_args["observer"] = MovingAverageMinMaxObserver
+    else:
+        extra_args["observer"] = MovingAveragePerChannelMinMaxObserver  # type: ignore[dict-item]
     
     weight_observer_or_fake_quant_ctr: _ObserverOrFakeQuantizeConstructor = (
         MinMaxObserver
     )
-    if is_qat:
-        # TODO: qat + per channel?
-        weight_observer_or_fake_quant_ctr = FusedMovingAvgObsFakeQuantize
-    else:
-        weight_observer_or_fake_quant_ctr = PerChannelMinMaxObserver
+    weight_observer_or_fake_quant_ctr = FusedMovingAvgObsFakeQuantize
 
+    extra_args["averaging_constant"] = averaging_constant
     weight_dtype = quant_config.weight_dtype
     if weight_dtype is not None:
         weight_quantization_spec = QuantizationSpec(
@@ -222,17 +216,17 @@ def get_config(config: Dict[str, Any]):
     return is_symmetric, quant_config
 
 
-def load_global_config(global_config: Dict[str, str]):
+def load_global_config(global_config: Dict[str, str],is_qat:bool=False):
     is_symmetric, quant_config = get_config(global_config)
-    global_quantization_config = get_quantization_config(is_symmetric=is_symmetric, quant_config=quant_config)
+    global_quantization_config = get_quantization_config(is_symmetric=is_symmetric, is_qat=is_qat, quant_config=quant_config)
     return global_quantization_config
 
 
-def load_regional_config(regional_config: Dict[str, str]):
+def load_regional_config(regional_config: Dict[str, str],is_qat:bool=False):
     module_names = regional_config.get("module_names", None)
     module_type = regional_config["module_type"]
     is_symmetric, quant_config = get_config(regional_config["module_config"])
-    module_config = get_quantization_config(is_symmetric=is_symmetric, quant_config=quant_config)
+    module_config = get_quantization_config(is_symmetric=is_symmetric, is_qat=is_qat, quant_config=quant_config)
     regional_quantization_config = QuantizerRegionalConf(
         module_names=module_names,
         module_type=module_type,
@@ -241,20 +235,20 @@ def load_regional_config(regional_config: Dict[str, str]):
     return regional_quantization_config
 
 
-def load_config(config_file: str):
+def load_config(config_file: str, is_qat:bool=False):
 
     with open(config_file, 'r') as f:
         config = json.load(f)
     
     # global
     global_config = config["global_config"]
-    global_quantization_config = load_global_config(global_config)
+    global_quantization_config = load_global_config(global_config, is_qat)
 
     # rregional
     regional_configs = config["regional_configs"]
     regional_quantization_configs = []
     for regional_config in regional_configs:
-        regional_quantization_config = load_regional_config(regional_config)
+        regional_quantization_config = load_regional_config(regional_config, is_qat)
         regional_quantization_configs.append(regional_quantization_config)
 
     return global_quantization_config, regional_quantization_configs
