@@ -1397,6 +1397,10 @@ def annotate_bias(model: torch.fx.GraphModule):
             torch.ops.aten.conv2d.default,
             # torch.ops.aten.linear.default,
         ]:
+            
+            if "quantization_annotation" not in node.meta:
+                continue
+
             if len(node.args) <= 2 or node.args[2] is None:
                 continue
             input_act = node.args[0]

@@ -249,8 +249,8 @@ class Solver(object):
         self.dmodel = prepare_qat_pt2e(exported_model.to(DEVICE), quantizer).to(DEVICE)
         
         torch.ao.quantization.move_exported_model_to_train(self.dmodel)
-        self._run_valid()
         with torch.no_grad():
+            self._run_valid()
             torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
             PTQ_STATE_TO_DICT = self.dmodel.state_dict()
             torch.save(PTQ_STATE_TO_DICT, "./ptq.pth")
@@ -348,11 +348,14 @@ class Solver(object):
                         self.best_state = states.copy_state(state)
                         self.best_changed = True
                         with torch.no_grad():
+                            
                             device = "cuda"
                             e_inputs= (export_example_inputs[0].to(device),export_example_inputs[1].to(device))
                             torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
                             pt_model = torch.export.export(self.dmodel, e_inputs)
-                            torch.export.save(pt_model, "./htdemucs_bset_qat.pt")
+                            save_path = f"./htdemucs_qat_{valid_loss}.pt"
+                            torch.export.save(pt_model, save_path)
+                            logger.info(f'save ptq weights to {save_path}')
                     # Eval model every `test.every` epoch or on last epoch
                     should_eval = (epoch + 1) % self.args.test.every == 0
                     is_last = epoch == self.args.epochs - 1
