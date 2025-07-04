@@ -94,7 +94,7 @@ def get_quantization_config(
     )
     extra_args: Dict[str, Any] = {"eps": 2**-12}
 
-    averaging_constant = 0.01 if is_qat else 0.0
+    averaging_constant = 0.01 if is_qat else 1.0
 
     if is_dynamic:
         act_observer_or_fake_quant_ctr = FakeQuantize
