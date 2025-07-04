@@ -234,31 +234,32 @@ class Solver(object):
             "mix":{0: torch.export.Dim.AUTO,2:torch.export.Dim.AUTO} , "mag":{0: torch.export.Dim.AUTO,3:torch.export.Dim.AUTO} 
         }
         exported_model = torch.export.export_for_training(self.dmodel.to(DEVICE), example_inputs, dynamic_shapes=dynamic_shapes).module()
-        exported_model_forqat = copy.deepcopy(exported_model)
+        exported_model_forqat = torch.export.export_for_training(self.dmodel.to(DEVICE), example_inputs, dynamic_shapes=dynamic_shapes).module()
+
         
-        # # dynamo_export(self.dmodel.to(mix.device), example_inputs, './htdemocus_float_model.onnx')
-        # global_config, regional_configs = load_config("../../../config.json", is_qat=False)
-        # quantizer = AXQuantizer()
-        # quantizer.set_global(global_config)
-        # quantizer.set_regional(regional_configs)
+        
+        # dynamo_export(self.dmodel.to(mix.device), example_inputs, './htdemocus_float_model.onnx')
+        global_config, regional_configs = load_config("../../../config.json", is_qat=False)
+        quantizer = AXQuantizer()
+        quantizer.set_global(global_config)
+        quantizer.set_regional(regional_configs)
 
         # # # old code
 
-        # self.dmodel = prepare_qat_pt2e(exported_model.to(DEVICE), quantizer).to(DEVICE)
+        self.dmodel = prepare_qat_pt2e(exported_model.to(DEVICE), quantizer).to(DEVICE)
         
-        # self.model.train()
-        # torch.ao.quantization.move_exported_model_to_train(self.dmodel)
-        # valid = self._run_one_epoch(0, train=False)
-        # bvalid = valid
-        # with torch.no_grad():
-        #     torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
-        #     PTQ_STATE_TO_DICT = self.dmodel.state_dict()
-        #     torch.save(PTQ_STATE_TO_DICT, "./ptq.pth")
-        #     logger.info('save ptq weights to ./ptq.pth')
+        torch.ao.quantization.move_exported_model_to_train(self.dmodel)
+        self._run_valid()
+        with torch.no_grad():
+            torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
+            PTQ_STATE_TO_DICT = self.dmodel.state_dict()
+            torch.save(PTQ_STATE_TO_DICT, "./ptq.pth")
+            logger.info('save ptq weights to ./ptq.pth')
             
-        #     pt_model = torch.export.export(self.dmodel, export_example_inputs)
-        #     torch.export.save(pt_model, "./htdemucs_ptq.pt")
+            pt_model = torch.export.export(self.dmodel, export_example_inputs)
+            torch.export.save(pt_model, "./htdemucs_ptq.pt")
 
+        del self.dmodel
 
         global_config, regional_configs = load_config("../../../config.json", is_qat=True)
         qat_quantizer = AXQuantizer()
@@ -385,6 +386,39 @@ class Solver(object):
         onnx.save(model, "./htdemucs_qat_slim.onnx")
         exit()
 
+
+    def _run_valid(self):
+        args = self.args
+        data_loader = self.loaders['train']
+
+        name = " | PTQ "
+
+        total = len(data_loader)
+        if args.max_batches:
+            total = min(total, args.max_batches)
+        logprog = LogProgress(logger, data_loader, total=total,
+                              updates=self.args.misc.num_prints, name=name)
+        
+        for idx, sources in enumerate(logprog):
+            if idx >= 32:
+                break
+            sources = sources.to(self.device)
+            mix = sources[:, 0]
+            sources = sources[:, 1:]
+
+            z = self.model._spec(mix)
+            mag = self.model._magnitude(z)#.to(mix.device)
+            x, xt = self.dmodel(mix,mag)
+            # estimate = self.dmodel(mix)
+        
+            length = mix.shape[-1]
+            B, C, Fq, T = mag.shape
+            zout = self.model._mask(z, x)
+            x = self.model._ispec(zout, length)
+            S = len(self.model.sources)
+            xt = xt.view(B, S, -1, length)
+            estimate = xt + x
+
     def _run_one_epoch(self, epoch, train=True):
         args = self.args
         data_loader = self.loaders['train'] if train else self.loaders['valid']
@@ -409,8 +443,8 @@ class Solver(object):
             else:
                 mix = sources[:, 0]
                 sources = sources[:, 1:]
-            
             if not train and self.args.valid_apply:
+
                 estimate = apply_model(self.model, mix, split=self.args.test.split, overlap=0)
                 # exit()
             else:
