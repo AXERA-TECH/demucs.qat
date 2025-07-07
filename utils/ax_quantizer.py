@@ -391,10 +391,17 @@ class AXQuantizer(Quantizer):
                     # output_qspec=get_output_act_qspec(aconfig),
                     _annotated=True,
                 )
-
-        annotate_bias(model)
-
+        output =model.graph.output_node()
+        print(output.args, output.all_input_nodes, output.name, "\n\n")
+        for node in model.graph.nodes:
+            # from IPython import embed; embed()
+            if node.name in ["mean_1","sub_1", "std_1", "add_9", "div_1","mean","sub", "std", "add", "div", "conv2d", "sqrt","to", "add_8", "conv1d", "add_78", "add_79", "mul_278","mul_279"]:
+                print(node.type, node, node.name, node.args, node._input_nodes,node.all_input_nodes, end="\n\n\n")
+                
+                if "quantization_annotation" in node.meta:
+                    node.meta.pop("quantization_annotation")
         
+        annotate_bias(model)
         return model
 
     def validate(self, model: torch.fx.GraphModule) -> None:

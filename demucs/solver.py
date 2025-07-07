@@ -235,7 +235,10 @@ class Solver(object):
         }
         exported_model = torch.export.export_for_training(self.dmodel.to(DEVICE), example_inputs, dynamic_shapes=dynamic_shapes).module()
         exported_model_forqat = torch.export.export_for_training(self.dmodel.to(DEVICE), example_inputs, dynamic_shapes=dynamic_shapes).module()
-
+        with torch.no_grad():
+            pt_model = torch.export.export(exported_model, export_example_inputs)
+            torch.export.save(pt_model, "./htdemucs_export_float.pt")
+            logger.info('save float export model to ./htdemucs_export_float.pth')
         
         
         # dynamo_export(self.dmodel.to(mix.device), example_inputs, './htdemocus_float_model.onnx')
@@ -253,11 +256,10 @@ class Solver(object):
             self._run_valid()
             torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
             PTQ_STATE_TO_DICT = self.dmodel.state_dict()
-            torch.save(PTQ_STATE_TO_DICT, "./ptq.pth")
-            logger.info('save ptq weights to ./ptq.pth')
-            
+
             pt_model = torch.export.export(self.dmodel, export_example_inputs)
             torch.export.save(pt_model, "./htdemucs_ptq.pt")
+            logger.info('save ptq model to ./htdemucs_ptq.pt')
 
         del self.dmodel
 
@@ -280,6 +282,7 @@ class Solver(object):
                 torch.ao.quantization.move_exported_model_to_eval(self.dmodel)
                 pt_model = torch.export.export(self.dmodel, e_inputs)
                 torch.export.save(pt_model, "./htdemucs_qat_initial.pt")
+                logger.info('save qat model to ./htdemucs_qat_initial.pt')
             epoch = 0
             for epoch in range(len(self.history), self.args.epochs):
                 # Train one epoch
