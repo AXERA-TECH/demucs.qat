@@ -125,27 +125,29 @@ def _quant_spec_equal(qspec1: QuantizationSpec, qspec2: QuantizationSpec):
     )
 
 
-def _all_users_annotate_equal(input_node: Node, node: Node):
-    sibling_nodes = input_node.users
-    assert node in sibling_nodes
-    input_qspec = node.meta["quantization_annotation"].input_qspec_map[input_node]
-    for other in sibling_nodes:
-        if other == node:
+def _all_users_annotate_equal(input_node: Node, input_qspec: QuantizationSpec):
+    if input_qspec is None or isinstance(input_qspec, SharedQuantizationSpec):
+            return False
+
+    for node in input_node.users:
+        other_qspec = node.meta["quantization_annotation"].input_qspec_map[input_node] if "quantization_annotation" in node.meta else None
+        if other_qspec is None or isinstance(other_qspec, SharedQuantizationSpec):
             continue
-        other_qspec = other.meta["quantization_annotation"].input_qspec_map[input_node] if "quantization_annotation" in other.meta else None
         if not _quant_spec_equal(other_qspec, input_qspec):
             return False
     return True
 
 
 def _update_last_node_output_qspec(last_node: Node, node: Node, output_qspec: QuantizationSpec):
-    if len(list(last_node.users.keys())) == 1 or _all_users_annotate_equal(last_node, node):
+    input_qspec = node.meta["quantization_annotation"].input_qspec_map[last_node]
+    if len(list(last_node.users.keys())) == 1 or _all_users_annotate_equal(last_node, input_qspec):
         if "quantization_annotation" in last_node.meta:
             if isinstance(last_node.meta["quantization_annotation"].output_qspec, SharedQuantizationSpec):
                 prev_node = last_node.meta["quantization_annotation"].output_qspec.edge_or_node
-                # while isinstance(prev_node.meta["quantization_annotation"].output_qspec, SharedQuantizationSpec):
-                #     prev_node = prev_node.meta["quantization_annotation"].output_qspec.edge_or_node
-                if len(list(prev_node.users.keys())) == 1 or _all_users_annotate_equal(prev_node, last_node):
+                while isinstance(prev_node.meta["quantization_annotation"].output_qspec, SharedQuantizationSpec)\
+                    and (len(list(prev_node.users.keys())) == 1 or _all_users_annotate_equal(prev_node, input_qspec)):
+                    prev_node = prev_node.meta["quantization_annotation"].output_qspec.edge_or_node
+                if len(list(prev_node.users.keys())) == 1 or _all_users_annotate_equal(prev_node, input_qspec):
                     prev_node.meta["quantization_annotation"].output_qspec = output_qspec
             elif isinstance(last_node.meta["quantization_annotation"].output_qspec, QuantizationSpec):
                 last_node.meta["quantization_annotation"].output_qspec = output_qspec
@@ -397,7 +399,7 @@ def _annotate_conv(
     # Add `is_cuda` and `relu_is_inplace` dimensions
     combinations = itertools.product(  # type: ignore[assignment]
         combinations,
-        [True, False] if torch.cuda.is_available() else [False],  # is_cuda
+        [True] if torch.cuda.is_available() else [False],  # is_cuda
         [True, False],  # has_relu
         [True, False],  # relu_is_inplace
     )
@@ -416,19 +418,22 @@ def _annotate_conv(
             if not has_relu:
                 output_node = sub_match.name_node_map["output"]
                 users = list(output_node.users.keys())
-                if len(users) != 1:
-                    continue
-                next_node = users[0]
-                if next_node.op == "call_function" and next_node.target in [
-                    torch.ops.aten.relu.default,
-                    torch.ops.aten.relu_.default,
-                ]:
-                    continue
-                if not has_bn:
+                if len(users) == 1:
+                    next_node = users[0]
                     if next_node.op == "call_function" and next_node.target in [
-                        torch.ops.aten.batch_norm.default
+                        torch.ops.aten.relu.default,
+                        torch.ops.aten.relu_.default,
                     ]:
                         continue
+                    if not has_bn:
+                        if next_node.op == "call_function" and next_node.target in [
+                            torch.ops.aten.batch_norm.default
+                        ]:
+                            continue
+            else:
+                if not has_bn:
+                    # hack: relu 的上一个算子被 match 到的也是 relu ？
+                    sub_match.name_node_map["conv"] = sub_match.name_node_map["output"].args[0]
             matches.append(sub_match)
 
     # Annotate nodes returned in the matches
@@ -497,7 +502,7 @@ def _annotate_conv(
 
 
 @register_annotator("convtranspose")
-def _annotate_conv(
+def _annotate_convtranspose(
     gm: torch.fx.GraphModule,
     quantization_config: Optional[QuantizationConfig],
     module_names: List[str] = None,
@@ -593,19 +598,22 @@ def _annotate_conv(
             if not has_relu:
                 output_node = sub_match.name_node_map["output"]
                 users = list(output_node.users.keys())
-                if len(users) != 1:
-                    continue
-                next_node = users[0]
-                if next_node.op == "" and  next_node.target in [
-                    torch.ops.aten.relu.default,
-                    torch.ops.aten.relu_.default,
-                ]:
-                    continue
-                if not has_bn :
-                    if next_node.target in [
-                        torch.ops.aten.batch_norm.default
+                if len(users) == 1:
+                    next_node = users[0]
+                    if next_node.op == "call_function" and next_node.target in [
+                        torch.ops.aten.relu.default,
+                        torch.ops.aten.relu_.default,
                     ]:
                         continue
+                    if not has_bn:
+                        if next_node.op == "call_function" and next_node.target in [
+                            torch.ops.aten.batch_norm.default
+                        ]:
+                            continue
+            else:
+                if not has_bn:
+                    # hack: relu 的上一个算子被 match 到的也是 relu ？
+                    sub_match.name_node_map["conv"] = sub_match.name_node_map["output"].args[0]
             matches.append(sub_match)
 
     # Annotate nodes returned in the matches
@@ -1005,6 +1013,26 @@ def _annotate_matmul(
     )
 
 
+@register_annotator("gridsample")
+def _annotate_gridsample(
+    gm: torch.fx.GraphModule,
+    quantization_config: Optional[QuantizationConfig],
+    module_names: List[str] = None,
+    is_global: bool = True,
+) -> Optional[List[List[Node]]]:
+
+    aten_ops = [
+        torch.ops.aten.grid_sampler.default,
+    ]
+    _do_annotate_dyadic(
+        gm,
+        quantization_config,
+        module_names,
+        is_global,
+        aten_ops
+    )
+
+
 def _do_annotate_activate(
     gm: torch.fx.GraphModule,
     quantization_config: Optional[QuantizationConfig],
@@ -1298,6 +1326,7 @@ def _is_share_obs_or_fq_op(op: Callable) -> bool:
         torch.ops.aten.view_copy.default,
         torch.ops.aten.view.default,
         torch.ops.aten.flatten.using_ints,
+        torch.ops.aten.reshape.default,
         # squeeze
         torch.ops.aten.squeeze.dim,
         torch.ops.aten.squeeze_copy.dim,
@@ -1318,6 +1347,7 @@ def _is_share_obs_or_fq_op(op: Callable) -> bool:
         torch.ops.aten.hardtanh_.default,
         torch.ops.aten.mean.default,
         torch.ops.aten.mean.dim,
+        torch.ops.aten.slice.Tensor,
         torch.ops.aten.slice_copy.Tensor,
     ]
 
@@ -1359,6 +1389,8 @@ def propagate_annotation(model: torch.fx.GraphModule) -> None:
 
 # TODO: make the list of ops customizable
 def _convert_scalars_to_attrs(model: torch.fx.GraphModule) -> torch.fx.GraphModule:
+    device = next(model.parameters()).device if list(model.parameters()) else torch.device("cpu")
+
     for n in model.graph.nodes:
         if n.op != "call_function" or n.target not in [
             torch.ops.aten.add.Tensor,
@@ -1374,7 +1406,7 @@ def _convert_scalars_to_attrs(model: torch.fx.GraphModule) -> torch.fx.GraphModu
             prefix = "_tensor_constant_"
             get_new_attr_name = get_new_attr_name_with_prefix(prefix)
             tensor_constant_name = get_new_attr_name(model)
-            float_tensor = torch.tensor(float(args[i]))
+            float_tensor = torch.tensor(float(args[i])).to(device)
             model.register_buffer(tensor_constant_name, float_tensor)
             fake_mode = n.meta["val"].fake_mode
             with model.graph.inserting_before(n):

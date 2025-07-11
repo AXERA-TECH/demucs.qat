@@ -158,7 +158,7 @@ def evaluate_np(sess, data_loader_test):
     return top1, top5
 
 
-def evaluate(model, data_loader_test):
+def evaluate(model, data_loader_test, total_size=None):
     _logger = logging.getLogger("resnet:")
     if isinstance(model, torch.fx.graph_module.GraphModule):
         torch.ao.quantization.move_exported_model_to_eval(model)
@@ -171,6 +171,8 @@ def evaluate(model, data_loader_test):
 
     with torch.no_grad():
         for i, (image, target) in enumerate(data_loader_test):
+            if total_size is not None and i >= total_size:
+                return top1, top5
             image = image.to(device)
             target = target.to(device)
             output = model(image)
@@ -250,7 +252,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, ntrain_bat
 
 def dynamo_export(model, inputs, onnx_path):
     onnx_program = torch.onnx.export(model, inputs, output_names=['output'], dynamo=True, opset_version=21)
-    # onnx_program.optimize()
+    onnx_program.optimize()
     onnx_program.save(onnx_path)
     print(f"save onnx model to [{onnx_path}] Successfully!")
 
@@ -261,3 +263,4 @@ def onnx_simplify(onnx_path, sim_path):
     model = onnx.load(onnx_path)
     model_simp = slim(model)
     onnx.save(model_simp, sim_path)
+    print(f"save onnx model to [{sim_path}] Successfully!")

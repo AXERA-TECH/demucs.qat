@@ -42,7 +42,43 @@ from utils.train_utils import (
     dynamo_export,
     onnx_simplify,
 )
+import math
 import utils.quantized_decomposed_dequantize_per_channel
+from torch._decomp import register_decomposition, get_decompositions
+aten = torch._ops.ops.aten
+@register_decomposition(aten.scaled_dot_product_attention.default)
+def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
+        is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
+    assert attn_mask is None
+    assert dropout_p == 0.0
+    assert not is_causal
+    assert scale is None
+    assert not enable_gqa
+    # L, S = query.size(-2), key.size(-2)
+    # scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+    # attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+    # if is_causal:
+    #     assert attn_mask is None
+    #     temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+    #     attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+    #     attn_bias.to(query.dtype)
+
+    # if attn_mask is not None:
+    #     if attn_mask.dtype == torch.bool:
+    #         attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+    #     else:
+    #         attn_bias = attn_mask + attn_bias
+
+    # if enable_gqa:
+    #     key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
+    #     value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
+
+    scale_factor = 1 / math.sqrt(query.size(-1))
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+    # attn_weight += attn_bias
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+    attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+    return attn_weight @ value
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +278,9 @@ class Solver(object):
             "mix":{0: torch.export.Dim.AUTO,2:torch.export.Dim.AUTO} , "mag":{0: torch.export.Dim.AUTO,3:torch.export.Dim.AUTO} 
         }
             
-        exported_model = torch.export.export_for_training(self.dmodel.to(mix.device), example_inputs, dynamic_shapes=dynamic_shapes).module()
+        exported_model = torch.export.export_for_training(self.dmodel.to(mix.device), example_inputs, dynamic_shapes=dynamic_shapes)#.module()
+        decompositions = {aten.scaled_dot_product_attention.default: scaled_dot_product_attention}
+        exported_model = exported_model.run_decompositions(decompositions).module()
         self.dmodel = prepare_qat_pt2e(exported_model, quantizer).to(DEVICE)
         e_inputs= (export_example_inputs[0].to(DEVICE),export_example_inputs[1].to(DEVICE))
         # self.dmodel = prepare_pt2e(exported_model, quantizer).to('cuda')
@@ -444,7 +482,24 @@ class Solver(object):
             else:
                 z = self.model._spec(mix)
                 mag = self.model._magnitude(z)#.to(mix.device)
-                x, xt = self.dmodel(mix,mag)
+                x = mag
+                B, C, Fq, T = x.shape
+                mean = torch.mean(x)
+                std = torch.std(x)
+                x = (x - mean) / (torch.tensor(1e-5).to(x) + std)
+                # x will be the freq. branch input.
+
+                # # Prepare the time branch input.
+                xt = mix
+                # meant = xt.mean(dim=(1, 2), keepdim=True)
+                # stdt = xt.std(dim=(1, 2), keepdim=True)
+                # xt = (xt - meant) / (1e-5 + stdt)
+                meant = torch.mean(xt)
+                stdt = torch.std(xt)
+                xt = (xt - meant) / (torch.tensor(1e-5).to(xt) + stdt)
+                x, xt = self.dmodel(xt,x)
+                x = x * std + mean
+                xt = xt * stdt + meant
                 # estimate = self.dmodel(mix)
             
                 length = mix.shape[-1]

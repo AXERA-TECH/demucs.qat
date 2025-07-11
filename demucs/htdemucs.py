@@ -679,42 +679,44 @@ class HTDemucs(nn.Module):
         return x
 
     def forward_for_export(self, mix, mag):
-        # https://github.com/microsoft/onnxscript/blob/ec806972573dbcccde5af269297e5f8444b0f279/onnxscript/function_libs/torch_lib/ops/prims.py#L179
-        # 现在还不支持 broadcast
-        length = mix.shape[-1]
-        length_pre_pad = None
-        # if self.use_train_segment:
-        #     if self.training:
-        #         self.segment = Fraction(mix.shape[-1], self.samplerate)
-        #     else:
-        #         training_length = int(self.segment * self.samplerate)
-        #         if mix.shape[-1] < training_length:
-        #             length_pre_pad = mix.shape[-1]
-        #             mix = F.pad(mix, (0, training_length - length_pre_pad))
-        # z = self._spec(mix)
-        # mag = self._magnitude(z).to(mix.device)
+        xt = mix
         x = mag
+        # # https://github.com/microsoft/onnxscript/blob/ec806972573dbcccde5af269297e5f8444b0f279/onnxscript/function_libs/torch_lib/ops/prims.py#L179
+        # # 现在还不支持 broadcast
+        # length = mix.shape[-1]
+        # length_pre_pad = None
+        # # if self.use_train_segment:
+        # #     if self.training:
+        # #         self.segment = Fraction(mix.shape[-1], self.samplerate)
+        # #     else:
+        # #         training_length = int(self.segment * self.samplerate)
+        # #         if mix.shape[-1] < training_length:
+        # #             length_pre_pad = mix.shape[-1]
+        # #             mix = F.pad(mix, (0, training_length - length_pre_pad))
+        # # z = self._spec(mix)
+        # # mag = self._magnitude(z).to(mix.device)
+        # x = mag
 
         B, C, Fq, T = x.shape
         
-        # export时候下面归一化有问题，会报错！！！
-        # unlike previous Demucs, we always normalize because it is easier.
-        # mean = x.mean(dim=(1, 2, 3), keepdim=True)
-        # std = x.std(dim=(1, 2, 3), keepdim=True)
-        # x = (x - mean) / (1e-5 + std)
-        mean = torch.mean(x)
-        std = torch.std(x)
-        x = (x - mean) / (torch.tensor(1e-5).to(x) + std)
-        # x will be the freq. branch input.
+        # # export时候下面归一化有问题，会报错！！！
+        # # unlike previous Demucs, we always normalize because it is easier.
+        # # mean = x.mean(dim=(1, 2, 3), keepdim=True)
+        # # std = x.std(dim=(1, 2, 3), keepdim=True)
+        # # x = (x - mean) / (1e-5 + std)
+        # mean = torch.mean(x)
+        # std = torch.std(x)
+        # x = (x - mean) / (torch.tensor(1e-5).to(x) + std)
+        # # x will be the freq. branch input.
 
-        # # Prepare the time branch input.
-        xt = mix
-        # meant = xt.mean(dim=(1, 2), keepdim=True)
-        # stdt = xt.std(dim=(1, 2), keepdim=True)
-        # xt = (xt - meant) / (1e-5 + stdt)
-        meant = torch.mean(xt)
-        stdt = torch.std(xt)
-        xt = (xt - meant) / (torch.tensor(1e-5).to(xt) + stdt)
+        # # # Prepare the time branch input.
+        # xt = mix
+        # # meant = xt.mean(dim=(1, 2), keepdim=True)
+        # # stdt = xt.std(dim=(1, 2), keepdim=True)
+        # # xt = (xt - meant) / (1e-5 + stdt)
+        # meant = torch.mean(xt)
+        # stdt = torch.std(xt)
+        # xt = (xt - meant) / (torch.tensor(1e-5).to(xt) + stdt)
 
         # okay, this is a giant mess I know...
         saved = []  # skip connections, freq.
@@ -786,42 +788,42 @@ class HTDemucs(nn.Module):
 
         S = len(self.sources)
         x = x.view(B, S, -1, Fq, T)
-        # 这里报错没有std和mean
-        # x = x * std[:, None] + mean[:, None]
-        x = x * std + mean
+        # # 这里报错没有std和mean
+        # # x = x * std[:, None] + mean[:, None]
+        # x = x * std + mean
 
-        # # to cpu as mps doesnt support complex numbers
-        # # demucs issue #435 ##432
-        # # NOTE: in this case z already is on cpu
-        # # TODO: remove this when mps supports complex numbers
-        # x_is_mps = x.device.type == "mps"
-        # if x_is_mps:
-        #     x = x.cpu()
+        # # # to cpu as mps doesnt support complex numbers
+        # # # demucs issue #435 ##432
+        # # # NOTE: in this case z already is on cpu
+        # # # TODO: remove this when mps supports complex numbers
+        # # x_is_mps = x.device.type == "mps"
+        # # if x_is_mps:
+        # #     x = x.cpu()
 
-        # # zout = self._mask(z, x)
-        # # # # if self.use_train_segment:
-        # # # #     if self.training:
-        # # # #         x = self._ispec(zout, length)
-        # # # #     else:
-        # # # #         x = self._ispec(zout, training_length)
-        # # # # else:
-        # # # #     x = self._ispec(zout, length)
-        # # x = self._ispec(zout, length)
+        # # # zout = self._mask(z, x)
+        # # # # # if self.use_train_segment:
+        # # # # #     if self.training:
+        # # # # #         x = self._ispec(zout, length)
+        # # # # #     else:
+        # # # # #         x = self._ispec(zout, training_length)
+        # # # # # else:
+        # # # # #     x = self._ispec(zout, length)
+        # # # x = self._ispec(zout, length)
 
-        # # back to mps device
-        # if x_is_mps:
-        #     x = x.to("mps")
+        # # # back to mps device
+        # # if x_is_mps:
+        # #     x = x.to("mps")
 
-        # # if self.use_train_segment:
-        # #     if self.training:
-        # #         xt = xt.view(B, S, -1, length)
-        # #     else:
-        # #         xt = xt.view(B, S, -1, training_length)
-        # # else:
-        # #     xt = xt.view(B, S, -1, length)
-        # xt = xt.view(B, S, -1, length)
-        xt = xt * stdt + meant
-        # x = xt + x
-        # # if length_pre_pad:
-        # #     x = x[..., :length_pre_pad]
+        # # # if self.use_train_segment:
+        # # #     if self.training:
+        # # #         xt = xt.view(B, S, -1, length)
+        # # #     else:
+        # # #         xt = xt.view(B, S, -1, training_length)
+        # # # else:
+        # # #     xt = xt.view(B, S, -1, length)
+        # # xt = xt.view(B, S, -1, length)
+        # xt = xt * stdt + meant
+        # # x = xt + x
+        # # # if length_pre_pad:
+        # # #     x = x[..., :length_pre_pad]
         return x, xt

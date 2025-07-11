@@ -199,26 +199,29 @@ def get_quantization_config(
 
 def get_config(config: Dict[str, Any]):
     is_symmetric = config["is_symmetric"]
-    input_dtype = DtypeConf(
-        dtype=tmp_dtype_map[config["input"]["dtype"]],
-        qmin=config["input"]["qmin"],
-        qmax=config["input"]["qmax"]
-    )
-
-    if "weight" in config:
-        weight_dtype = DtypeConf(
-            dtype=tmp_dtype_map[config["weight"]["dtype"]],
-            qmin=config["weight"]["qmin"],
-            qmax=config["weight"]["qmax"]
-        )
+    if config["input"]["dtype"] == "FP32":
+        quant_config = QuantConf()
     else:
-        weight_dtype = None
+        input_dtype = DtypeConf(
+            dtype=tmp_dtype_map[config["input"]["dtype"]],
+            qmin=config["input"]["qmin"],
+            qmax=config["input"]["qmax"]
+        )
 
-    quant_config = QuantConf(
-        input_dtype=input_dtype,
-        weight_dtype=weight_dtype,
-        output_dtype=input_dtype
-    )
+        if "weight" in config:
+            weight_dtype = DtypeConf(
+                dtype=tmp_dtype_map[config["weight"]["dtype"]],
+                qmin=config["weight"]["qmin"],
+                qmax=config["weight"]["qmax"]
+            )
+        else:
+            weight_dtype = None
+
+        quant_config = QuantConf(
+            input_dtype=input_dtype,
+            weight_dtype=weight_dtype,
+            output_dtype=input_dtype
+        )
     return is_symmetric, quant_config
 
 
@@ -303,6 +306,7 @@ class AXQuantizer(Quantizer):
         "mul",  # mul, mul_relu
         "gelu",
         "glu",
+        "gridsample",
         "groupnorm",
         "silu",
         "softmax",
@@ -332,7 +336,21 @@ class AXQuantizer(Quantizer):
         }
         regional_matmul_config = load_regional_config(regional_matmul)
         self.regional_configs.append(regional_matmul_config)
-        # TODO: gridsample
+        # gridsample
+        regional_gridsample = {
+            "module_names": None,
+            "module_type": "gridsample",
+            "module_config": {
+                "is_symmetric": True,
+                "input": {
+                    "dtype": "S16",
+                    "qmin": -32767,
+                    "qmax": 32767
+                },
+            }
+        }
+        regional_gridsample_config = load_regional_config(regional_gridsample)
+        self.regional_configs.append(regional_gridsample_config)
         return self
         
     
@@ -366,41 +384,8 @@ class AXQuantizer(Quantizer):
                     continue
                 OP_TO_ANNOTATOR[module_type](model, module_config, module_names, is_global=False)
 
-
-        # set grid_sample input feature to symmetric quant
-        from torch.ao.quantization.quantizer.xnnpack_quantizer_utils import (
-            get_input_act_qspec,
-            get_output_act_qspec,
-        )
-        from torch.ao.quantization.quantizer import (
-            QuantizationAnnotation,
-            QuantizationSpec,
-            QuantizationSpecBase,
-            SharedQuantizationSpec,
-        )
-        for node in model.graph.nodes:
-            if node.op == "call_function" and  node.target  in [torch.ops.aten.grid_sampler.default]:
-                # from IPython import embed; embed()
-                
-                config = get_quantization_config(is_symmetric=True, is_qat=True, act_dtype=torch.int16, act_qmin=-(2**15-1), act_qmax=2**15-1)
-
-                relu_node = node.args[0]
-                relu_node.meta["quantization_annotation"].output_qspec = get_input_act_qspec(config)
-
-                input_qspec_map = {}
-                input_act0 = node.args[0]
-                input_qspec_map[input_act0] = get_input_act_qspec(config)
-                input_act1 = node.args[1]
-                input_qspec_map[input_act1] = get_input_act_qspec(config)
-                node.meta["quantization_annotation"] = QuantizationAnnotation(
-                    input_qspec_map=input_qspec_map,
-                    # output_qspec=get_output_act_qspec(aconfig),
-                    _annotated=True,
-                )
-
         annotate_bias(model)
 
-        
         return model
 
     def validate(self, model: torch.fx.GraphModule) -> None:
